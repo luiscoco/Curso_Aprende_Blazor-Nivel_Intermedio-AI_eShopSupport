@@ -2,6 +2,143 @@
 
 https://www.youtube.com/watch?v=pM9bTeaaAlQ&list=PLdo4fOcmZ0oX7Yg1cixIj6hXjz9C5MHJR&index=3
 
+## How to set up OpenAI instead of Ollama
+
+Modify the Program.cs file:
+
+![image](https://github.com/user-attachments/assets/c6c68424-88a1-4e85-a8ca-73afa8a46dc6)
+
+Include this code in the middleware:
+
+```
+var chatCompletion = builder.AddConnectionString("chatcompletion");
+```
+
+And also define the OpenAI connection string in the appSettings.json file:
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Aspire.Hosting.Dcp": "Warning"
+    }
+  },
+  "Parameters": {
+    "PostgresPassword": "dev"
+  },
+  "ConnectionStrings": {
+    "chatcompletion": "ApiKey=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX;Endpoint=https://api.openai.com/v1;Model=gpt-4o"
+  }
+}
+```
+
+To obtain an OpenAI key navigate to this URL: https://platform.openai.com/api-keys
+
+Also modify the following files: 
+
+![image](https://github.com/user-attachments/assets/bf0f5250-99e4-4e5b-b064-e0f50fcc3f0a)
+
+**ChatCompletionServiceExtensions.cs**
+
+```csharp
+using Microsoft.Extensions.AI;
+
+namespace Microsoft.Extensions.Hosting;
+
+public static class ChatCompletionServiceExtensions
+{
+    public static void AddChatCompletionService(this IHostApplicationBuilder builder, string serviceName)
+    {
+        var pipeline = (ChatClientBuilder pipeline) => pipeline
+            .UseFunctionInvocation()
+            .UseCachingForTest()
+            .UseOpenTelemetry(configure: c => c.EnableSensitiveData = true);
+
+        if (builder.Configuration[$"{serviceName}:Type"] == "ollama")
+        {
+           // builder.AddOllamaChatClient(serviceName, pipeline);
+        }
+        else
+        {
+            builder.AddOpenAIChatClient(serviceName, pipeline);
+        }
+    }
+}
+```
+
+**ServiceCollectionChatClientExtensions.cs**
+
+```csharp
+using Azure.AI.OpenAI;
+using System.ClientModel;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using OpenAI;
+using System.Data.Common;
+using Microsoft.Extensions.Configuration;
+
+namespace Microsoft.Extensions.Hosting;
+
+public static class ServiceCollectionChatClientExtensions
+{
+    public static IServiceCollection AddOpenAIChatClient(
+        this IHostApplicationBuilder hostBuilder,
+        string serviceName,
+        Func<ChatClientBuilder, ChatClientBuilder>? builder = null,
+        string? modelOrDeploymentName = null)
+    {
+        // Retrieve the connection string from configuration
+        var connectionString = hostBuilder.Configuration.GetConnectionString(serviceName);
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException($"No connection string named '{serviceName}' was found. Ensure a corresponding Aspire service was registered.");
+        }
+
+        // Parse the connection string to extract API key, endpoint, and model/deployment name
+        var connectionStringBuilder = new DbConnectionStringBuilder();
+        connectionStringBuilder.ConnectionString = connectionString;
+
+        // Extract necessary parameters from the connection string
+        var apiKey = (string?)connectionStringBuilder["ApiKey"] ?? throw new InvalidOperationException($"The connection string named '{serviceName}' does not specify a value for 'ApiKey', but this is required.");
+        var endpoint = (string?)connectionStringBuilder["Endpoint"];
+        modelOrDeploymentName ??= (string?)connectionStringBuilder["Model"] ?? throw new InvalidOperationException($"The connection string named '{serviceName}' does not specify a value for 'Model', and no value was passed for {nameof(modelOrDeploymentName)}.");
+
+        // Create the endpoint URI if provided
+        var endpointUri = string.IsNullOrEmpty(endpoint) ? null : new Uri(endpoint);
+
+        // Register the OpenAI chat client
+        return hostBuilder.Services.AddOpenAIChatClient(apiKey, modelOrDeploymentName, endpointUri, builder);
+    }
+
+    public static IServiceCollection AddOpenAIChatClient(
+        this IServiceCollection services,
+        string apiKey,
+        string modelOrDeploymentName,
+        Uri? endpoint = null,
+        Func<ChatClientBuilder, ChatClientBuilder>? builder = null)
+    {
+        // Register the OpenAI client depending on whether an endpoint is provided
+        return services
+            .AddSingleton(_ => endpoint is null
+                ? new OpenAIClient(apiKey)  // Use OpenAI's client with API key
+                : new AzureOpenAIClient(endpoint, new ApiKeyCredential(apiKey))) // Azure-specific client
+            .AddChatClient(pipeline =>
+            {
+                // Apply additional configurations if provided
+                builder?.Invoke(pipeline);
+
+                // Use the OpenAI or Azure OpenAI client as the chat client
+                var openAiClient = pipeline.Services.GetRequiredService<OpenAIClient>();
+                return pipeline.Use(openAiClient.AsChatClient(modelOrDeploymentName));
+            });
+    }
+}
+```
+
+## General Description
+
 A sample .NET application showcasing common use cases and development practices for build AI solutions in .NET (Generative AI, specifically). This sample demonstrates a customer support application for an e-commerce website using a services-based architecture with .NET Aspire. It includes support for the following AI use cases:
 
 * Text classification, applying labels based on content
